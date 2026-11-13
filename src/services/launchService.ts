@@ -5,6 +5,10 @@ import {
   StationMeta,
   TidePoint,
 } from '../data/stations';
+import {
+  composeFallbackMessages,
+  computeFallbackWindowsFromTides,
+} from '../utils/tidePlannerFallback';
 
 export type WindowRating = 'Good' | 'Caution' | 'Avoid';
 
@@ -232,38 +236,11 @@ export async function getTides(
   };
 }
 
-export async function planWindows(
-  location: LocationId,
-  tides: TidePoint[]
-): Promise<LaunchWindow[]> {
-  const station = getStationById(location);
-
-  const response = await fetch('/api/plan-windows', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      location: station.id,
-      timezoneLabel: station.timezoneLabel,
-      harborNote: station.harborNote,
-      tides,
-    }),
-  });
-
-  const textBody = await response.text();
-  if (!response.ok) {
-    const errObj = safeParseJson<{ error?: string }>(textBody);
-    throw new Error(errObj?.error || `Failed to plan launch windows (HTTP ${response.status}).`);
-  }
-
-  const parsed = safeParseJson<
-    Array<{ start?: string; end?: string; rating?: string; reason?: string }>
-  >(textBody);
-
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new Error('Could not parse launch windows JSON from Gemini response.');
-  }
-
-  return parsed.slice(0, 3).map((item, idx) => {
+function mapRawWindowsToLaunchWindows(
+  station: StationMeta,
+  rawItems: Array<{ start?: string; end?: string; rating?: string; reason?: string }>
+): LaunchWindow[] {
+  return rawItems.slice(0, 3).map((item, idx) => {
     const start = String(item.start || '09:00').trim();
     const end = String(item.end || '12:00').trim();
     const rating: WindowRating =
@@ -284,47 +261,116 @@ export async function planWindows(
   });
 }
 
+export async function planWindows(
+  location: LocationId,
+  tides: TidePoint[]
+): Promise<LaunchWindow[]> {
+  const station = getStationById(location);
+
+  try {
+    const response = await fetch('/api/plan-windows', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        location: station.id,
+        timezoneLabel: station.timezoneLabel,
+        harborNote: station.harborNote,
+        tides,
+      }),
+    });
+
+    // Static-only deployments (GitHub Pages, Cloudflare Static, standalone Vite preview)
+    // do not run /api/* routes and return 404 or 405; compute windows from live NOAA tides.
+    if (response.status === 404 || response.status === 405) {
+      const computed = computeFallbackWindowsFromTides(station, tides);
+      return mapRawWindowsToLaunchWindows(station, computed);
+    }
+
+    const textBody = await response.text();
+    if (!response.ok) {
+      const errObj = safeParseJson<{ error?: string }>(textBody);
+      throw new Error(
+        errObj?.error || `Failed to plan launch windows (HTTP ${response.status}).`
+      );
+    }
+
+    const parsed = safeParseJson<
+      Array<{ start?: string; end?: string; rating?: string; reason?: string }>
+    >(textBody);
+
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      const computed = computeFallbackWindowsFromTides(station, tides);
+      return mapRawWindowsToLaunchWindows(station, computed);
+    }
+
+    return mapRawWindowsToLaunchWindows(station, parsed);
+  } catch (err) {
+    // If network/fetch to /api/* fails on a static host, fall back to live-tide computation
+    if (err instanceof TypeError) {
+      const computed = computeFallbackWindowsFromTides(station, tides);
+      return mapRawWindowsToLaunchWindows(station, computed);
+    }
+    throw err;
+  }
+}
+
 export async function writeMessages(
   location: LocationId,
   windows: LaunchWindow[],
   day: DayChoice = 'Today'
 ): Promise<MessagesResult> {
   const station = getStationById(location);
+  const rawWindows = windows.map((w) => ({
+    start: w.start,
+    end: w.end,
+    rating: w.rating,
+    reason: w.reason,
+  }));
 
-  const response = await fetch('/api/write-messages', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      location: station.id,
-      timezoneLabel: station.timezoneLabel,
-      day,
-      windows: windows.map((w) => ({
-        start: w.start,
-        end: w.end,
-        rating: w.rating,
-        reason: w.reason,
-      })),
-    }),
-  });
+  try {
+    const response = await fetch('/api/write-messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        location: station.id,
+        timezoneLabel: station.timezoneLabel,
+        day,
+        windows: rawWindows,
+      }),
+    });
 
-  const textBody = await response.text();
-  if (!response.ok) {
-    const errObj = safeParseJson<{ error?: string }>(textBody);
-    throw new Error(errObj?.error || `Failed to generate messages (HTTP ${response.status}).`);
+    if (response.status === 404 || response.status === 405) {
+      return composeFallbackMessages(station, rawWindows, day);
+    }
+
+    const textBody = await response.text();
+    if (!response.ok) {
+      const errObj = safeParseJson<{ error?: string }>(textBody);
+      throw new Error(
+        errObj?.error || `Failed to generate messages (HTTP ${response.status}).`
+      );
+    }
+
+    const parsed = safeParseJson<{ staffBriefing?: string; customerMessage?: string }>(
+      textBody
+    );
+
+    if (
+      !parsed ||
+      typeof parsed.staffBriefing !== 'string' ||
+      typeof parsed.customerMessage !== 'string'
+    ) {
+      return composeFallbackMessages(station, rawWindows, day);
+    }
+
+    return {
+      staffBriefing: parsed.staffBriefing.trim(),
+      customerMessage: parsed.customerMessage.trim(),
+    };
+  } catch (err) {
+    if (err instanceof TypeError) {
+      return composeFallbackMessages(station, rawWindows, day);
+    }
+    throw err;
   }
-
-  const parsed = safeParseJson<{ staffBriefing?: string; customerMessage?: string }>(textBody);
-
-  if (
-    !parsed ||
-    typeof parsed.staffBriefing !== 'string' ||
-    typeof parsed.customerMessage !== 'string'
-  ) {
-    throw new Error('Could not parse messages JSON from Gemini response.');
-  }
-
-  return {
-    staffBriefing: parsed.staffBriefing.trim(),
-    customerMessage: parsed.customerMessage.trim(),
-  };
 }
