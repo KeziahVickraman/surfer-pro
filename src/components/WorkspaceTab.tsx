@@ -10,14 +10,17 @@ import {
   OctagonAlert,
   RefreshCw,
   ShieldAlert,
+  Waves,
 } from 'lucide-react';
-import { DayChoice, LOCATIONS, LocationId } from '../data/mockTides';
+import { DayChoice, getStationById, LOCATIONS, LocationId } from '../data/stations';
 import {
+  getCachedPlan,
   getTides,
   LaunchWindow,
   MessagesResult,
-  MockApiError,
+  NoaaApiError,
   planWindows,
+  setCachedPlan,
   TideResult,
   WindowRating,
   writeMessages,
@@ -66,8 +69,9 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({ selectedPlanName }) 
   const [day, setDay] = useState<DayChoice>('Today');
   const [simulateError, setSimulateError] = useState<boolean>(false);
 
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorState, setErrorState] = useState<{ message: string; url: string } | null>(null);
+  const [aiWarning, setAiWarning] = useState<string | null>(null);
 
   const [tideData, setTideData] = useState<TideResult | null>(null);
   const [windows, setWindows] = useState<LaunchWindow[]>([]);
@@ -76,41 +80,111 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({ selectedPlanName }) 
   const [copiedBriefing, setCopiedBriefing] = useState<boolean>(false);
   const [copiedMessage, setCopiedMessage] = useState<boolean>(false);
 
+  // When switching location or day, only hydrate from in-memory cache (never fetch automatically)
+  useEffect(() => {
+    setErrorState(null);
+    const cached = getCachedPlan(location, day);
+    if (cached && !simulateError) {
+      setTideData(cached.tideData);
+      setWindows(cached.windows);
+      setMessages(cached.messages);
+      setAiWarning(cached.aiWarning);
+    } else {
+      setTideData(null);
+      setWindows([]);
+      setMessages(null);
+      setAiWarning(null);
+    }
+  }, [location, day, simulateError]);
+
   const runPlan = useCallback(
     async (
       targetLocation: LocationId,
       targetDay: DayChoice,
       shouldFail: boolean
     ) => {
-      setIsLoading(true);
       setErrorState(null);
+      setAiWarning(null);
+
+      // Return cached result immediately unless simulating an error
+      if (!shouldFail) {
+        const cached = getCachedPlan(targetLocation, targetDay);
+        if (cached) {
+          setTideData(cached.tideData);
+          setWindows(cached.windows);
+          setMessages(cached.messages);
+          setAiWarning(cached.aiWarning);
+          return;
+        }
+      }
+
+      setIsLoading(true);
+      const station = getStationById(targetLocation);
 
       try {
-        const tidesResult = await getTides(targetLocation, targetDay, {
+        // Step 1: Fetch live NOAA tides
+        const tidesResult = await getTides(station.noaaStationId, targetDay, {
           simulateError: shouldFail,
         });
-        const plannedWindows = await planWindows(
-          targetLocation,
-          targetDay,
-          tidesResult.tides
-        );
-        const generatedMessages = await writeMessages(
-          targetLocation,
-          targetDay,
-          plannedWindows,
-          tidesResult.tides
-        );
 
+        // Show tide timeline immediately even if Gemini fails or returns invalid JSON
         setTideData(tidesResult);
-        setWindows(plannedWindows);
-        setMessages(generatedMessages);
+        setWindows([]);
+        setMessages(null);
+
+        // Step 2 & 3: Plan windows and write messages via Gemini
+        let plannedWindows: LaunchWindow[] = [];
+        let generatedMessages: MessagesResult | null = null;
+        let warningMsg: string | null = null;
+
+        try {
+          plannedWindows = await planWindows(targetLocation, tidesResult.tides);
+          setWindows(plannedWindows);
+
+          try {
+            generatedMessages = await writeMessages(
+              targetLocation,
+              plannedWindows,
+              targetDay
+            );
+            setMessages(generatedMessages);
+          } catch (msgErr) {
+            warningMsg =
+              msgErr instanceof Error
+                ? `Tide timeline and windows loaded, but message drafting failed: ${msgErr.message}`
+                : 'Tide timeline and windows loaded, but message drafting failed.';
+          }
+        } catch (winErr) {
+          warningMsg =
+            winErr instanceof Error
+              ? `Tide timeline loaded, but AI window planning failed: ${winErr.message}`
+              : 'Tide timeline loaded, but AI window planning failed.';
+        }
+
+        setAiWarning(warningMsg);
+
+        if (!warningMsg && plannedWindows.length > 0 && generatedMessages) {
+          setCachedPlan(station.noaaStationId, targetDay, {
+            tideData: tidesResult,
+            windows: plannedWindows,
+            messages: generatedMessages,
+            aiWarning: null,
+          });
+        }
       } catch (err) {
-        if (err instanceof MockApiError) {
+        setTideData(null);
+        setWindows([]);
+        setMessages(null);
+
+        if (err instanceof NoaaApiError) {
           setErrorState({ message: err.message, url: err.url });
         } else {
           setErrorState({
-            message: 'Unexpected error generating daily launch plan.',
-            url: 'https://api.tidesandcurrents.noaa.gov/api/prod/datagetter',
+            message:
+              err instanceof Error
+                ? err.message
+                : 'Unexpected error generating daily launch plan.',
+            url: `https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?station=${station.noaaStationId}`,
           });
         }
       } finally {
@@ -119,10 +193,6 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({ selectedPlanName }) 
     },
     []
   );
-
-  useEffect(() => {
-    runPlan(location, day, simulateError);
-  }, [location, day, simulateError, runPlan]);
 
   const handleCopy = async (text: string, target: 'briefing' | 'message') => {
     try {
@@ -285,138 +355,168 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({ selectedPlanName }) 
             Planning {day.toLowerCase()}&apos;s launch windows for {location}
           </h2>
           <p className="mt-1.5 text-base text-slate-600">
-            Reading high &amp; low tide turns and drafting dock briefings...
+            Fetching NOAA tide predictions and drafting dock briefings...
+          </p>
+        </section>
+      )}
+
+      {/* Ready / Empty State before button click */}
+      {!isLoading && !errorState && !tideData && (
+        <section className="bg-white border border-slate-200 rounded-xl py-16 px-6 flex flex-col items-center justify-center text-center">
+          <Waves className="w-10 h-10 text-sky-700 mb-3" aria-hidden="true" />
+          <h2 className="text-xl font-bold text-slate-900 tracking-tight">
+            Ready to plan {day.toLowerCase()} for {location}
+          </h2>
+          <p className="mt-2 text-base text-slate-600 max-w-lg">
+            Click <span className="font-semibold text-slate-900">Plan my day</span> to
+            fetch live NOAA tide predictions and generate launch windows, a staff
+            briefing, and customer updates.
           </p>
         </section>
       )}
 
       {/* Populated Workspace State */}
-      {!isLoading && !errorState && tideData && messages && (
+      {!isLoading && !errorState && tideData && (
         <div className="space-y-6">
-          {/* Tide Timeline */}
+          {/* Tide Timeline (always shown if NOAA succeeded, even if Gemini parsing failed) */}
           <TideTimelineChart
             tides={tideData.tides}
             windows={windows}
             station={tideData.station}
           />
 
-          {/* Launch Windows Cards */}
-          <section aria-labelledby="windows-heading">
-            <div className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-1 mb-4">
-              <h2
-                id="windows-heading"
-                className="text-xl font-bold text-slate-900 tracking-tight"
-              >
-                Recommended Launch Windows
-              </h2>
-              <p className="text-sm text-slate-600">{tideData.station.harborNote}</p>
-            </div>
+          {/* Non-fatal Gemini parsing / AI warning */}
+          {aiWarning && (
+            <section
+              role="status"
+              className="bg-amber-50 border border-amber-200 rounded-xl px-5 py-4 flex items-start gap-3 text-amber-900"
+            >
+              <AlertTriangle className="w-5 h-5 text-amber-700 mt-0.5 shrink-0" aria-hidden="true" />
+              <p className="text-sm sm:text-base">{aiWarning}</p>
+            </section>
+          )}
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-              {windows.map((win) => {
-                const style = RATING_STYLE[win.rating];
-                const RatingIcon = style.Icon;
-                return (
-                  <article
-                    key={win.id}
-                    className={`bg-white border ${style.cardBorder} rounded-xl p-6 flex flex-col justify-between`}
-                  >
-                    <div>
-                      <div className="flex items-center justify-between gap-3 mb-3">
-                        <span className="text-lg font-bold text-slate-900 font-mono tabular-nums">
-                          {win.timeRange}
-                        </span>
-                        <span
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-sm font-semibold whitespace-nowrap shrink-0 ${style.badgeBg} ${style.badgeText} ${style.badgeBorder}`}
-                        >
-                          <RatingIcon className="w-4 h-4" aria-hidden="true" />
-                          {win.rating}
-                        </span>
+          {/* Launch Windows Cards */}
+          {windows.length > 0 && (
+            <section aria-labelledby="windows-heading">
+              <div className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-1 mb-4">
+                <h2
+                  id="windows-heading"
+                  className="text-xl font-bold text-slate-900 tracking-tight"
+                >
+                  Recommended Launch Windows
+                </h2>
+                <p className="text-sm text-slate-600">{tideData.station.harborNote}</p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                {windows.map((win) => {
+                  const style = RATING_STYLE[win.rating];
+                  const RatingIcon = style.Icon;
+                  return (
+                    <article
+                      key={win.id}
+                      className={`bg-white border ${style.cardBorder} rounded-xl p-6 flex flex-col justify-between`}
+                    >
+                      <div>
+                        <div className="flex items-center justify-between gap-3 mb-3">
+                          <span className="text-lg font-bold text-slate-900 font-mono tabular-nums">
+                            {win.timeRange}
+                          </span>
+                          <span
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-sm font-semibold whitespace-nowrap shrink-0 ${style.badgeBg} ${style.badgeText} ${style.badgeBorder}`}
+                          >
+                            <RatingIcon className="w-4 h-4" aria-hidden="true" />
+                            {win.rating}
+                          </span>
+                        </div>
+                        <p className="text-base text-slate-700 leading-relaxed">
+                          {win.reason}
+                        </p>
                       </div>
-                      <p className="text-base text-slate-700 leading-relaxed">
-                        {win.reason}
-                      </p>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          </section>
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          )}
 
           {/* Staff Briefing & Customer Message Panels */}
-          <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Staff Briefing Panel */}
-            <div className="bg-white border border-slate-200 rounded-xl p-6 flex flex-col justify-between">
-              <div>
-                <div className="flex items-center justify-between gap-4 mb-4">
-                  <div>
-                    <h2 className="text-xl font-bold text-slate-900 tracking-tight">
-                      Morning Staff Briefing
-                    </h2>
-                    <p className="text-sm text-slate-500 mt-0.5">
-                      For dock team &amp; tour guides
-                    </p>
+          {messages && (
+            <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Staff Briefing Panel */}
+              <div className="bg-white border border-slate-200 rounded-xl p-6 flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center justify-between gap-4 mb-4">
+                    <div>
+                      <h2 className="text-xl font-bold text-slate-900 tracking-tight">
+                        Morning Staff Briefing
+                      </h2>
+                      <p className="text-sm text-slate-500 mt-0.5">
+                        For dock team &amp; tour guides
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleCopy(messages.staffBriefing, 'briefing')}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 text-sm font-semibold hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-sky-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      {copiedBriefing ? (
+                        <>
+                          <Check className="w-4 h-4 text-emerald-700" aria-hidden="true" />
+                          Copied
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-4 h-4" aria-hidden="true" />
+                          Copy briefing
+                        </>
+                      )}
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => handleCopy(messages.staffBriefing, 'briefing')}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 text-sm font-semibold hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-sky-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                  >
-                    {copiedBriefing ? (
-                      <>
-                        <Check className="w-4 h-4 text-emerald-700" aria-hidden="true" />
-                        Copied
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-4 h-4" aria-hidden="true" />
-                        Copy briefing
-                      </>
-                    )}
-                  </button>
-                </div>
-                <div className="bg-slate-50 border border-slate-200 rounded-lg p-5 text-base text-slate-800 leading-relaxed whitespace-pre-line">
-                  {messages.staffBriefing}
+                  <div className="bg-slate-50 border border-slate-200 rounded-lg p-5 text-base text-slate-800 leading-relaxed whitespace-pre-line">
+                    {messages.staffBriefing}
+                  </div>
                 </div>
               </div>
-            </div>
 
-            {/* Customer Message Panel */}
-            <div className="bg-white border border-slate-200 rounded-xl p-6 flex flex-col justify-between">
-              <div>
-                <div className="flex items-center justify-between gap-4 mb-4">
-                  <div>
-                    <h2 className="text-xl font-bold text-slate-900 tracking-tight">
-                      Customer-Ready Update
-                    </h2>
-                    <p className="text-sm text-slate-500 mt-0.5">
-                      Ready for SMS reminder or Instagram story
-                    </p>
+              {/* Customer Message Panel */}
+              <div className="bg-white border border-slate-200 rounded-xl p-6 flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center justify-between gap-4 mb-4">
+                    <div>
+                      <h2 className="text-xl font-bold text-slate-900 tracking-tight">
+                        Customer-Ready Update
+                      </h2>
+                      <p className="text-sm text-slate-500 mt-0.5">
+                        Ready for SMS reminder or Instagram story
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleCopy(messages.customerMessage, 'message')}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 text-sm font-semibold hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-sky-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      {copiedMessage ? (
+                        <>
+                          <Check className="w-4 h-4 text-emerald-700" aria-hidden="true" />
+                          Copied
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-4 h-4" aria-hidden="true" />
+                          Copy message
+                        </>
+                      )}
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => handleCopy(messages.customerMessage, 'message')}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 text-sm font-semibold hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-sky-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                  >
-                    {copiedMessage ? (
-                      <>
-                        <Check className="w-4 h-4 text-emerald-700" aria-hidden="true" />
-                        Copied
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-4 h-4" aria-hidden="true" />
-                        Copy message
-                      </>
-                    )}
-                  </button>
-                </div>
-                <div className="bg-sky-50/60 border border-sky-200 rounded-lg p-5 text-base text-slate-800 leading-relaxed">
-                  {messages.customerMessage}
+                  <div className="bg-sky-50/60 border border-sky-200 rounded-lg p-5 text-base text-slate-800 leading-relaxed">
+                    {messages.customerMessage}
+                  </div>
                 </div>
               </div>
-            </div>
-          </section>
+            </section>
+          )}
         </div>
       )}
     </div>

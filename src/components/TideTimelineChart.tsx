@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { StationMeta, TidePoint } from '../data/mockTides';
+import { StationMeta, TidePoint } from '../data/stations';
 import { formatTime12h, LaunchWindow, WindowRating } from '../services/launchService';
 
 interface TideTimelineChartProps {
@@ -9,7 +9,8 @@ interface TideTimelineChartProps {
 }
 
 function parseHour(time: string): number {
-  const [h, m] = time.split(':').map(Number);
+  const timePart = time.includes(' ') ? time.split(' ')[1] : time;
+  const [h, m] = timePart.split(':').map(Number);
   return h + m / 60;
 }
 
@@ -19,7 +20,6 @@ function interpolateTideHeight(hour: number, tides: TidePoint[]): number {
 
   const points = tides.map((t) => ({ hour: parseHour(t.time), height: t.height, type: t.type }));
 
-  // Build extended points before 0h and after 24h assuming ~6.2h half-cycle symmetry
   const first = points[0];
   const second = points[1] ?? first;
   const last = points[points.length - 1];
@@ -69,13 +69,13 @@ export const TideTimelineChart: React.FC<TideTimelineChartProps> = ({
 
   const heights = tides.map((t) => t.height);
   const rawMin = Math.min(...heights, 0);
-  const rawMax = Math.max(...heights, 6);
+  const rawMax = Math.max(...heights, 2);
   const yMin = Math.floor(rawMin);
-  const yMax = Math.ceil(rawMax + 1);
+  const yMax = Math.ceil(rawMax + 0.4);
   const ySpan = Math.max(yMax - yMin, 1);
 
   const xForHour = (h: number) => padLeft + (h / 24) * chartW;
-  const yForHeight = (ft: number) => padTop + chartH - ((ft - yMin) / ySpan) * chartH;
+  const yForHeight = (mVal: number) => padTop + chartH - ((mVal - yMin) / ySpan) * chartH;
 
   // Sample 96 points (every 15 min) for a smooth SVG spline path
   const sampleCount = 96;
@@ -93,7 +93,7 @@ export const TideTimelineChart: React.FC<TideTimelineChartProps> = ({
   const areaPath = `${linePath} L ${xForHour(24).toFixed(1)} ${(padTop + chartH).toFixed(1)} L ${xForHour(0).toFixed(1)} ${(padTop + chartH).toFixed(1)} Z`;
 
   const xTicks = [0, 3, 6, 9, 12, 15, 18, 21, 24];
-  const yTickStep = ySpan > 8 ? 3 : 2;
+  const yTickStep = ySpan > 5 ? 2 : 1;
   const yTicks: number[] = [];
   for (let v = yMin; v <= yMax; v += yTickStep) {
     yTicks.push(v);
@@ -160,7 +160,7 @@ export const TideTimelineChart: React.FC<TideTimelineChartProps> = ({
                   textAnchor="end"
                   className="fill-slate-500 text-[11px] font-mono tabular-nums"
                 >
-                  {tick} ft
+                  {tick} m
                 </text>
               </g>
             );
@@ -269,7 +269,7 @@ export const TideTimelineChart: React.FC<TideTimelineChartProps> = ({
 
             return (
               <g
-                key={`${tide.time}-${tide.type}`}
+                key={`${tide.time}-${tide.type}-${idx}`}
                 className="cursor-pointer"
                 onMouseEnter={() => setHoveredIndex(idx)}
                 onMouseLeave={() => setHoveredIndex(null)}
@@ -288,7 +288,7 @@ export const TideTimelineChart: React.FC<TideTimelineChartProps> = ({
                   textAnchor="middle"
                   className="fill-slate-900 text-[12px] font-semibold font-mono tabular-nums"
                 >
-                  {tide.type} {tide.height.toFixed(1)}ft
+                  {tide.type} {tide.height.toFixed(2)}m
                 </text>
               </g>
             );
@@ -319,7 +319,7 @@ export const TideTimelineChart: React.FC<TideTimelineChartProps> = ({
                   {formatTime12h(tide.time)} {station.timezoneLabel}
                 </span>
                 <span className="text-sm font-mono font-semibold text-sky-700 tabular-nums">
-                  {tide.height.toFixed(1)} ft
+                  {tide.height.toFixed(2)} m
                 </span>
               </div>
             </div>
