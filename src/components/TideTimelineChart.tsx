@@ -14,7 +14,7 @@ function parseHour(time: string): number {
   return h + m / 60;
 }
 
-// Smooth cosine interpolation across a 24-hour tidal cycle
+// Smooth cosine interpolation across a full 24-hour tidal cycle (0h to 24h)
 function interpolateTideHeight(hour: number, tides: TidePoint[]): number {
   if (tides.length === 0) return 0;
 
@@ -25,10 +25,35 @@ function interpolateTideHeight(hour: number, tides: TidePoint[]): number {
   const last = points[points.length - 1];
   const prevToLast = points[points.length - 2] ?? last;
 
+  // Build synthetic half-cycle anchors extending past 0h on the left and 24h on the right
+  const leftAnchors: Array<{ hour: number; height: number }> = [];
+  let leftHour = first.hour;
+  let useAlternateLeft = true;
+  while (leftHour > 0) {
+    leftHour -= 6.2;
+    leftAnchors.unshift({
+      hour: leftHour,
+      height: useAlternateLeft ? second.height : first.height,
+    });
+    useAlternateLeft = !useAlternateLeft;
+  }
+
+  const rightAnchors: Array<{ hour: number; height: number }> = [];
+  let rightHour = last.hour;
+  let useAlternateRight = true;
+  while (rightHour < 24) {
+    rightHour += 6.2;
+    rightAnchors.push({
+      hour: rightHour,
+      height: useAlternateRight ? prevToLast.height : last.height,
+    });
+    useAlternateRight = !useAlternateRight;
+  }
+
   const extended = [
-    { hour: first.hour - 6.2, height: second.height },
+    ...leftAnchors,
     ...points.map((p) => ({ hour: p.hour, height: p.height })),
-    { hour: last.hour + 6.2, height: prevToLast.height },
+    ...rightAnchors,
   ];
 
   for (let i = 0; i < extended.length - 1; i++) {
@@ -312,7 +337,7 @@ export const TideTimelineChart: React.FC<TideTimelineChartProps> = ({
               }`}
             >
               <div className="text-xs font-medium text-slate-500">
-                {isHigh ? 'High Tide' : 'Low Tide'}
+                {isHigh ? 'High Tide · Slack water' : 'Low Tide · Slack water'}
               </div>
               <div className="mt-0.5 flex items-baseline justify-between gap-2">
                 <span className="text-base font-bold text-slate-900 tabular-nums">
@@ -321,6 +346,9 @@ export const TideTimelineChart: React.FC<TideTimelineChartProps> = ({
                 <span className="text-sm font-mono font-semibold text-sky-700 tabular-nums">
                   {tide.height.toFixed(2)} m
                 </span>
+              </div>
+              <div className="mt-1 text-xs text-slate-500">
+                {isHigh ? 'Deepest dock & ramp clearance' : 'Check shallow shore & rocks'}
               </div>
             </div>
           );

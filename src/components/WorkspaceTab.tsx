@@ -38,6 +38,7 @@ const RATING_STYLE: Record<
     badgeText: string;
     badgeBorder: string;
     cardBorder: string;
+    decisionAction: string;
     Icon: React.FC<{ className?: string }>;
   }
 > = {
@@ -46,6 +47,7 @@ const RATING_STYLE: Record<
     badgeText: 'text-emerald-800',
     badgeBorder: 'border-emerald-200',
     cardBorder: 'border-slate-200',
+    decisionAction: 'Open all rentals',
     Icon: CheckCircle2,
   },
   Caution: {
@@ -53,6 +55,7 @@ const RATING_STYLE: Record<
     badgeText: 'text-amber-800',
     badgeBorder: 'border-amber-200',
     cardBorder: 'border-slate-200',
+    decisionAction: 'Guided or sheltered only',
     Icon: ShieldAlert,
   },
   Avoid: {
@@ -60,6 +63,7 @@ const RATING_STYLE: Record<
     badgeText: 'text-red-800',
     badgeBorder: 'border-red-200',
     cardBorder: 'border-slate-200',
+    decisionAction: 'Hold unguided launches',
     Icon: OctagonAlert,
   },
 };
@@ -362,16 +366,52 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({ selectedPlanName }) 
 
       {/* Ready / Empty State before button click */}
       {!isLoading && !errorState && !tideData && (
-        <section className="bg-white border border-slate-200 rounded-xl py-16 px-6 flex flex-col items-center justify-center text-center">
-          <Waves className="w-10 h-10 text-sky-700 mb-3" aria-hidden="true" />
-          <h2 className="text-xl font-bold text-slate-900 tracking-tight">
-            Ready to plan {day.toLowerCase()} for {location}
-          </h2>
-          <p className="mt-2 text-base text-slate-600 max-w-lg">
-            Click <span className="font-semibold text-slate-900">Plan my day</span> to
-            fetch live NOAA tide predictions and generate launch windows, a staff
-            briefing, and customer updates.
-          </p>
+        <section className="bg-white border border-slate-200 rounded-xl py-12 px-6 sm:px-10">
+          <div className="max-w-2xl mx-auto text-center">
+            <Waves className="w-10 h-10 text-sky-700 mx-auto mb-3" aria-hidden="true" />
+            <h2 className="text-2xl font-bold text-slate-900 tracking-tight">
+              Plan {day.toLowerCase()}&apos;s dock operations for {location}
+            </h2>
+            <p className="mt-2 text-base text-slate-600">
+              Click <span className="font-semibold text-slate-900">Plan my day</span> to
+              pull live NOAA tide turns and generate three morning decisions:
+            </p>
+          </div>
+
+          <div className="mt-8 grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-4xl mx-auto text-left">
+            <div className="border border-slate-200 rounded-lg p-4 bg-slate-50/70">
+              <div className="text-xs font-mono font-semibold text-sky-700 mb-1">01.</div>
+              <div className="text-sm font-bold text-slate-900">When to open or hold</div>
+              <p className="mt-1 text-sm text-slate-600">
+                Rated Go, Caution, and Avoid launch windows around slack water.
+              </p>
+            </div>
+            <div className="border border-slate-200 rounded-lg p-4 bg-slate-50/70">
+              <div className="text-xs font-mono font-semibold text-sky-700 mb-1">02.</div>
+              <div className="text-sm font-bold text-slate-900">What to tell dock staff</div>
+              <p className="mt-1 text-sm text-slate-600">
+                A concise morning safety briefing ready to copy to your team chat.
+              </p>
+            </div>
+            <div className="border border-slate-200 rounded-lg p-4 bg-slate-50/70">
+              <div className="text-xs font-mono font-semibold text-sky-700 mb-1">03.</div>
+              <div className="text-sm font-bold text-slate-900">What to send guests</div>
+              <p className="mt-1 text-sm text-slate-600">
+                An SMS or Instagram update pointing paddlers to calmest hours.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-7 flex justify-center">
+            <button
+              type="button"
+              onClick={() => runPlan(location, day, simulateError)}
+              className="inline-flex items-center gap-2.5 px-6 py-3 rounded-lg bg-sky-700 text-white text-base font-semibold hover:bg-sky-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-700 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <RefreshCw className="w-4 h-4" aria-hidden="true" />
+              Plan my day
+            </button>
+          </div>
         </section>
       )}
 
@@ -389,10 +429,19 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({ selectedPlanName }) 
           {aiWarning && (
             <section
               role="status"
-              className="bg-amber-50 border border-amber-200 rounded-xl px-5 py-4 flex items-start gap-3 text-amber-900"
+              className="bg-amber-50 border border-amber-200 rounded-xl px-5 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 text-amber-900"
             >
-              <AlertTriangle className="w-5 h-5 text-amber-700 mt-0.5 shrink-0" aria-hidden="true" />
-              <p className="text-sm sm:text-base">{aiWarning}</p>
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-amber-700 mt-0.5 shrink-0" aria-hidden="true" />
+                <p className="text-sm sm:text-base">{aiWarning}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => runPlan(location, day, false)}
+                className="px-4 py-2 rounded-lg bg-amber-800 text-white text-sm font-semibold hover:bg-amber-900 transition-colors cursor-pointer whitespace-nowrap shrink-0 self-start sm:self-auto"
+              >
+                Retry AI planning
+              </button>
             </section>
           )}
 
@@ -404,7 +453,7 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({ selectedPlanName }) 
                   id="windows-heading"
                   className="text-xl font-bold text-slate-900 tracking-tight"
                 >
-                  Recommended Launch Windows
+                  Dock Launch Decisions
                 </h2>
                 <p className="text-sm text-slate-600">{tideData.station.harborNote}</p>
               </div>
@@ -419,7 +468,7 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({ selectedPlanName }) 
                       className={`bg-white border ${style.cardBorder} rounded-xl p-6 flex flex-col justify-between`}
                     >
                       <div>
-                        <div className="flex items-center justify-between gap-3 mb-3">
+                        <div className="flex items-center justify-between gap-3 mb-2">
                           <span className="text-lg font-bold text-slate-900 font-mono tabular-nums">
                             {win.timeRange}
                           </span>
@@ -429,6 +478,9 @@ export const WorkspaceTab: React.FC<WorkspaceTabProps> = ({ selectedPlanName }) 
                             <RatingIcon className="w-4 h-4" aria-hidden="true" />
                             {win.rating}
                           </span>
+                        </div>
+                        <div className={`text-sm font-semibold mb-2 ${style.badgeText}`}>
+                          Action: {style.decisionAction}
                         </div>
                         <p className="text-base text-slate-700 leading-relaxed">
                           {win.reason}

@@ -7,7 +7,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
@@ -27,6 +27,48 @@ function stripJsonFences(raw: string): string {
 function safeParseJson<T>(raw: string): T {
   const cleaned = stripJsonFences(raw);
   return JSON.parse(cleaned) as T;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    msg.includes('503') ||
+    msg.includes('429') ||
+    msg.includes('UNAVAILABLE') ||
+    msg.includes('RESOURCE_EXHAUSTED') ||
+    msg.includes('overloaded') ||
+    msg.includes('high demand')
+  );
+}
+
+async function generateContentWithRetry(
+  params: Parameters<typeof ai.models.generateContent>[0]
+) {
+  const modelsToTry = [params.model, 'gemini-3.1-flash-lite'];
+  let lastError: unknown;
+
+  for (const modelName of modelsToTry) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await ai.models.generateContent({
+          ...params,
+          model: modelName,
+        });
+      } catch (err) {
+        lastError = err;
+        if (!isTransientError(err)) {
+          throw err;
+        }
+        await sleep(500 * (attempt + 1));
+      }
+    }
+  }
+
+  throw lastError;
 }
 
 interface TidePointInput {
@@ -62,7 +104,10 @@ async function createServer() {
       }
 
       const tideSummary = tides
-        .map((t) => `${t.time} ${timezoneLabel || ''} — ${t.type === 'H' ? 'High' : 'Low'} tide (${t.height.toFixed(2)} m)`)
+        .map(
+          (t) =>
+            `${t.time} ${timezoneLabel || ''} — ${t.type === 'H' ? 'High' : 'Low'} tide (${t.height.toFixed(2)} m)`
+        )
         .join('\n');
 
       const prompt = [
@@ -78,12 +123,12 @@ async function createServer() {
         '- rating must be exactly "Good", "Caution", or "Avoid".',
         '- Prefer "Good" windows around slack water near high or low tide when currents are slowest.',
         '- Prefer "Caution" or "Avoid" during peak mid-tide flood/ebb transitions or extreme low water.',
-        '- Keep each reason to ONE plain-English sentence written for beginner paddlers and rental counter staff.',
+        '- Keep each reason to ONE plain-English sentence explaining the dock decision for beginners.',
       ]
         .filter(Boolean)
         .join('\n');
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentWithRetry({
         model: 'gemini-4-hydrogen',
         contents: prompt,
         config: {
@@ -97,11 +142,13 @@ async function createServer() {
               properties: {
                 start: {
                   type: Type.STRING,
-                  description: 'Window start time in 24h HH:MM local station time, e.g. "08:30".',
+                  description:
+                    'Window start time in 24h HH:MM local station time, e.g. "08:30".',
                 },
                 end: {
                   type: Type.STRING,
-                  description: 'Window end time in 24h HH:MM local station time, e.g. "11:15".',
+                  description:
+                    'Window end time in 24h HH:MM local station time, e.g. "11:15".',
                 },
                 rating: {
                   type: Type.STRING,
@@ -109,7 +156,8 @@ async function createServer() {
                 },
                 reason: {
                   type: Type.STRING,
-                  description: 'One plain-English sentence explaining the rating for beginners.',
+                  description:
+                    'One plain-English sentence explaining the rating for beginners.',
                 },
               },
               required: ['start', 'end', 'rating', 'reason'],
@@ -133,12 +181,15 @@ async function createServer() {
           item.rating === 'Good' || item.rating === 'Caution' || item.rating === 'Avoid'
             ? item.rating
             : 'Caution',
-        reason: String(item.reason || 'Confirm local water conditions before launching.').trim(),
+        reason: String(
+          item.reason || 'Confirm local water conditions before launching.'
+        ).trim(),
       }));
 
       res.json(normalized);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to plan launch windows.';
+      const message =
+        err instanceof Error ? err.message : 'Failed to plan launch windows.';
       res.status(500).json({ error: message });
     }
   });
@@ -158,7 +209,10 @@ async function createServer() {
       }
 
       const windowsSummary = windows
-        .map((w) => `${w.start}–${w.end} ${timezoneLabel || ''}: ${w.rating} — ${w.reason}`)
+        .map(
+          (w) =>
+            `${w.start}–${w.end} ${timezoneLabel || ''}: ${w.rating} — ${w.reason}`
+        )
         .join('\n');
 
       const prompt = [
@@ -173,7 +227,7 @@ async function createServer() {
         'Return JSON ONLY: { "staffBriefing": "...", "customerMessage": "..." }.',
       ].join('\n');
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentWithRetry({
         model: 'gemini-4-hydrogen',
         contents: prompt,
         config: {
@@ -185,11 +239,13 @@ async function createServer() {
             properties: {
               staffBriefing: {
                 type: Type.STRING,
-                description: 'Morning dock briefing for staff, strictly under 80 words.',
+                description:
+                  'Morning dock briefing for staff, strictly under 80 words.',
               },
               customerMessage: {
                 type: Type.STRING,
-                description: 'Friendly SMS or Instagram update for customers, strictly under 50 words.',
+                description:
+                  'Friendly SMS or Instagram update for customers, strictly under 50 words.',
               },
             },
             required: ['staffBriefing', 'customerMessage'],
@@ -198,9 +254,16 @@ async function createServer() {
       });
 
       const rawText = response.text ?? '{}';
-      const parsed = safeParseJson<{ staffBriefing?: string; customerMessage?: string }>(rawText);
+      const parsed = safeParseJson<{
+        staffBriefing?: string;
+        customerMessage?: string;
+      }>(rawText);
 
-      if (!parsed || typeof parsed.staffBriefing !== 'string' || typeof parsed.customerMessage !== 'string') {
+      if (
+        !parsed ||
+        typeof parsed.staffBriefing !== 'string' ||
+        typeof parsed.customerMessage !== 'string'
+      ) {
         res.status(502).json({ error: 'Gemini returned incomplete message JSON.' });
         return;
       }
@@ -213,6 +276,10 @@ async function createServer() {
       const message = err instanceof Error ? err.message : 'Failed to write messages.';
       res.status(500).json({ error: message });
     }
+  });
+
+  app.all('/api/*', (_req, res) => {
+    res.status(404).json({ error: 'API route not found.' });
   });
 
   if (process.env.NODE_ENV !== 'production') {
