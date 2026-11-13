@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 interface TidePointInput {
   t?: string;
@@ -236,28 +236,34 @@ export default async function handler(req: ServerlessRequest, res: ServerlessRes
 
     for (const model of modelsToTry) {
       try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: prompt,
-          config: {
-            systemInstruction:
-              'You are a coastal paddling safety planner. Always respond with valid JSON matching the requested schema. No markdown fences or extra commentary.',
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  start: { type: Type.STRING },
-                  end: { type: Type.STRING },
-                  rating: { type: Type.STRING },
-                  reason: { type: Type.STRING },
+        const response = await Promise.race([
+          ai.models.generateContent({
+            model,
+            contents: prompt,
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              systemInstruction:
+                'You are a coastal paddling safety planner. Always respond with valid JSON matching the requested schema. No markdown fences or extra commentary.',
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    start: { type: Type.STRING },
+                    end: { type: Type.STRING },
+                    rating: { type: Type.STRING },
+                    reason: { type: Type.STRING },
+                  },
+                  required: ['start', 'end', 'rating', 'reason'],
                 },
-                required: ['start', 'end', 'rating', 'reason'],
               },
             },
-          },
-        });
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Gemini request timeout')), 7500)
+          ),
+        ]);
         rawText = response.text ?? '';
         if (rawText) break;
       } catch {

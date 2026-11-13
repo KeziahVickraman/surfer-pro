@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
 interface LaunchWindowInput {
   start: string;
@@ -137,23 +137,29 @@ export default async function handler(req: ServerlessRequest, res: ServerlessRes
 
     for (const model of modelsToTry) {
       try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: prompt,
-          config: {
-            systemInstruction:
-              'You write concise operational dock briefings and warm customer messages for a kayak and paddleboard rental shop. Return valid JSON only.',
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                staffBriefing: { type: Type.STRING },
-                customerMessage: { type: Type.STRING },
+        const response = await Promise.race([
+          ai.models.generateContent({
+            model,
+            contents: prompt,
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              systemInstruction:
+                'You write concise operational dock briefings and warm customer messages for a kayak and paddleboard rental shop. Return valid JSON only.',
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  staffBriefing: { type: Type.STRING },
+                  customerMessage: { type: Type.STRING },
+                },
+                required: ['staffBriefing', 'customerMessage'],
               },
-              required: ['staffBriefing', 'customerMessage'],
             },
-          },
-        });
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Gemini request timeout')), 7500)
+          ),
+        ]);
         rawText = response.text ?? '';
         if (rawText) break;
       } catch {
