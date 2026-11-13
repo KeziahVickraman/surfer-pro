@@ -1,0 +1,6 @@
+{
+  "name": "Launch Window",
+  "description": "Plan safe daily launch windows, morning staff briefings, and customer-ready updates from tide data for kayak, paddleboard, and boat-rental operators.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
